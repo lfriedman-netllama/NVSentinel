@@ -200,6 +200,13 @@ func NodeMergePatch(original, modified *v1.Node) ([]byte, error) {
 		return nil, nil
 	}
 
+	if len(spec) > 0 {
+		// Lists in spec, such as taints, are replaced wholesale. ResourceVersion
+		// prevents a stale list from overwriting a concurrent update.
+		metadata["resourceVersion"] = original.ResourceVersion
+		root["metadata"] = metadata
+	}
+
 	patch, err := json.Marshal(root)
 	if err != nil {
 		return nil, fmt.Errorf("marshal merge patch for node %s: %w", original.Name, err)
