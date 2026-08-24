@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sync"
 	"time"
 
@@ -154,10 +155,9 @@ func isRetryableNodePatchError(err error) bool {
 		errors.IsServiceUnavailable(err)
 }
 
-// NodeMergePatch builds an RFC 7386 JSON merge patch carrying the label and
-// annotation differences between original and modified. It returns a nil patch when
-// the two already agree, so callers can skip the write instead of spending an API
-// call on a no-op.
+// NodeMergePatch builds an RFC 7386 JSON merge patch carrying differences in labels,
+// annotations, taints, and unschedulable state. It returns a nil patch when the two
+// nodes already agree, so callers can skip a no-op write.
 //
 // The patch is assembled key by key rather than by marshalling modified, because
 // marshalling a Node emits every populated field. A caller that read original from an
@@ -165,10 +165,10 @@ func isRetryableNodePatchError(err error) bool {
 // over the real object. Emitting only keys that differ means fields missing from both
 // sides are left untouched.
 //
-// Spec fields such as taints and unschedulable are deliberately out of scope: a merge
-// patch replaces a list wholesale, so patching taints from a projected Node whose Spec
-// had been cleared would silently drop every taint on the real object.
+// Taints are emitted only when the caller changed them. A projected Node whose Spec
+// is empty on both sides therefore cannot erase taints from the real object.
 func NodeMergePatch(original, modified *v1.Node) ([]byte, error) {
+	root := map[string]any{}
 	metadata := map[string]any{}
 
 	if labels := stringMapMergePatch(original.Labels, modified.Labels); labels != nil {
@@ -179,16 +179,47 @@ func NodeMergePatch(original, modified *v1.Node) ([]byte, error) {
 		metadata["annotations"] = annotations
 	}
 
-	if len(metadata) == 0 {
+	if len(metadata) > 0 {
+		root["metadata"] = metadata
+	}
+
+	spec := map[string]any{}
+	if !taintsEqual(original.Spec.Taints, modified.Spec.Taints) {
+		spec["taints"] = modified.Spec.Taints
+	}
+
+	if original.Spec.Unschedulable != modified.Spec.Unschedulable {
+		spec["unschedulable"] = modified.Spec.Unschedulable
+	}
+
+	if len(spec) > 0 {
+		root["spec"] = spec
+	}
+
+	if len(root) == 0 {
 		return nil, nil
 	}
 
-	patch, err := json.Marshal(map[string]any{"metadata": metadata})
+	patch, err := json.Marshal(root)
 	if err != nil {
 		return nil, fmt.Errorf("marshal merge patch for node %s: %w", original.Name, err)
 	}
 
 	return patch, nil
+}
+
+func taintsEqual(original, modified []v1.Taint) bool {
+	if len(original) != len(modified) {
+		return false
+	}
+
+	for idx := range original {
+		if !reflect.DeepEqual(original[idx], modified[idx]) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // stringMapMergePatch returns the merge patch entries that turn original into
